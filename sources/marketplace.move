@@ -311,6 +311,164 @@ module movefans::sui_marketplace {
         })
     }
 
+    // Create a new shop for the recipient and emit a ShopCreated event
+    public fun create_shop(recipient: address, ctx: &mut TxContext) {
+        let shop_uid = object::new(ctx); 
+        let shop_owner_cap_uid = object::new(ctx); 
+
+        let shop_id = object::uid_to_inner(&shop_uid);
+        let shop_owner_cap_id = object::uid_to_inner(&shop_owner_cap_uid);
+
+        transfer::transfer(ShopOwnerCapability {
+            id: shop_owner_cap_uid,
+            shop: shop_id
+         }, recipient);
+
+        transfer::share_object(Shop {
+            id: shop_uid,
+            shop_owner_cap: shop_owner_cap_id,
+            balance: balance::zero<SUI>(),
+            items: vector::empty(),
+            item_count: 0,
+        });
+
+        event::emit(ShopCreated{
+           shop_id, 
+           shop_owner_cap_id
+        })
+	}
+
+    // Adds a new item to the shop and emits an ItemAdded event
+    public fun add_item(
+        shop: &mut Shop,
+        shop_owner_cap: &ShopOwnerCapability, 
+        title: vector<u8>,
+        description: vector<u8>,
+        url: vector<u8>,
+        price: u64, 
+        supply: u64, 
+        category: u8
+    ) {
+        assert!(shop.shop_owner_cap == object::uid_to_inner(&shop_owner_cap.id), ENotShopOwner);
+        assert!(price > 0, EInvalidPrice);
+        assert!(supply > 0, EInvalidSupply);
+
+        let item_id = shop.items.length();
+
+        let item = Item{
+            id: item_id,
+            title: string::utf8(title),
+            description: string::utf8(description),
+            price: price,
+            url: url::new_unsafe_from_bytes(url),
+            listed: true,
+            category: category,
+            total_supply: supply,
+            available: supply,
+        };
+
+        shop.items.push_back(item);
+        shop.item_count += 1;
+
+        event::emit(ItemAdded{
+            shop_id: object::uid_to_inner(&shop.id), 
+            item: item_id
+        });
+    }
+
+    // Unlists an item from the shop and emits an ItemUnlisted event
+    public fun unlist_item(
+        shop: &mut Shop,
+        shop_owner_cap: &ShopOwnerCapability,
+        item_id: u64
+    ) {
+        assert!(shop.shop_owner_cap == object::uid_to_inner(&shop_owner_cap.id), ENotShopOwner);
+        assert!(item_id < shop.items.length(), EInvalidItemId);
+
+        shop.items[item_id].listed = false;
+
+        event::emit(ItemUnlisted {
+           shop_id: object::uid_to_inner(&shop.id),
+           item_id: item_id
+        })
+    }
+
+    // Purchases an item from the shop and emits an ItemPurchased event
+    public fun purchase_item(
+        shop: &mut Shop, 
+        item_id: u64,
+        quantity: u64,
+        recipient: address,
+        payment_coin: &mut coin::Coin<SUI>,
+        ctx: &mut TxContext
+    ) {
+        assert!(item_id < shop.items.length(), EInvalidItemId);
+        
+        let item = &mut shop.items[item_id];
+        
+        assert!(item.available >= quantity, EInvalidQuantity);
+
+        let total_price = item.price * quantity;
+        assert!(payment_coin.value() >= total_price, EInsufficientPayment);
+
+        assert!(item.listed == true, EItemIsNotListed);
+
+        item.available -= quantity;
+
+        let paid = payment_coin.split(total_price, ctx);
+
+        coin::put(&mut shop.balance, paid);
+
+        for _ in 0..quantity {
+            let purchased_item_uid = object::new(ctx);
+
+            transfer::transfer(PurchasedItem {
+                id: purchased_item_uid,
+                shop_id: object::uid_to_inner(&shop.id),
+                item_id: item_id 
+            }, recipient);
+        }
+
+        event::emit(ItemPurchased {
+            shop_id: object::uid_to_inner(&shop.id),
+            item_id: item_id,
+            quantity: quantity,
+            buyer: recipient,
+        });
+
+        if item.available == 0 {
+            event::emit(ItemUnlisted{
+                shop_id: object::uid_to_inner(&shop.id),
+                item_id: item_id,
+            });
+
+            vector::borrow_mut(&mut shop.items, item_id).listed = false;
+        }
+    }
+
+    // Withdraws SUI from the shop to the recipient and emits a ShopWithdrawal event
+    public fun withdraw_from_shop(
+        shop: &mut Shop,
+        shop_owner_cap: &ShopOwnerCapability,
+        amount: u64,
+        recipient: address,
+        ctx: &mut TxContext
+    ) {
+        assert!(shop.shop_owner_cap == object::uid_to_inner(&shop_owner_cap.id), ENotShopOwner);
+        
+        assert!(amount > 0 && amount <= shop.balance.value(), EInvalidWithdrawalAmount);
+
+        let take_coin = coin::take(&mut shop.balance, amount, ctx);
+        
+        transfer::public_transfer(take_coin, recipient);
+        
+        event::emit(ShopWithdrawal{
+            shop_id: object::uid_to_inner(&shop.id),
+            amount: amount,
+            recipient: recipient
+        });
+    }
+
     /*
         Purchases an item from the shop and emits an ItemPurchased event. Abort if the item id is
         invalid, the payment coin is insufficient, if the item is unlisted, or the shop does not 
