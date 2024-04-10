@@ -87,7 +87,6 @@ module movefans::sui_marketplace {
     */
 	public struct Shop has key {
 		id: UID,
-        shop_owner_cap: ID,
 		balance: Balance<SUI>,
 		items: vector<Item>,
         item_count: u64
@@ -120,8 +119,9 @@ module movefans::sui_marketplace {
         @param available - The available supply of the item. Will be less than or equal to the total
             supply and will start at the total supply and decrease as items are purchased.
     */
-    public struct Item has store {
-		id: u64,
+    public struct Item has key, store {
+        id: UID,
+		id_: u64,
 		title: String,
 		description: String,
 		price: u64,
@@ -131,19 +131,6 @@ module movefans::sui_marketplace {
         total_supply: u64,
         available: u64
 	}
-
-    /*
-        The purchased item struct represents a purchased item receipt. A purchased item receipt is
-        a object that is owned by the buyer and is used to represent a purchased item.
-        @param id - The object id of the purchased item object.
-        @param shop_id - The object id of the shop object.
-        @param item_id - The id of the item object.
-    */
-    public struct PurchasedItem has key {
-        id: UID,
-        shop_id: ID, 
-        item_id: u64
-    }
 
     //==============================================================================================
     // Event structs - DO NOT MODIFY
@@ -211,7 +198,7 @@ module movefans::sui_marketplace {
         @param recipient - The address of the recipient of the shop.
         @param ctx - The transaction context.
 	*/
-	public fun create_shop(recipient: address, ctx: &mut TxContext) {
+	public fun create_shop(ctx: &mut TxContext) {
         let shop_uid = object::new(ctx); 
         let shop_owner_cap_uid = object::new(ctx); 
 
@@ -221,11 +208,10 @@ module movefans::sui_marketplace {
         transfer::transfer(ShopOwnerCapability {
             id: shop_owner_cap_uid,
             shop: shop_id
-         }, recipient);
+         }, ctx.sender());
 
         transfer::share_object(Shop {
             id: shop_uid,
-            shop_owner_cap: shop_owner_cap_id,
             balance: balance::zero<SUI>(),
             items: vector::empty(),
             item_count: 0,
@@ -258,16 +244,18 @@ module movefans::sui_marketplace {
         url: vector<u8>,
         price: u64, 
         supply: u64, 
-        category: u8
+        category: u8,
+        ctx: &mut TxContext
     ) {
-        assert!(shop.shop_owner_cap== object::uid_to_inner(&shop_owner_cap.id), ENotShopOwner);
+        assert!(shop_owner_cap.shop == object::id(shop), ENotShopOwner);
         assert!(price>0, EInvalidPrice);
         assert!(supply>0, EInvalidSupply);
 
         let item_id = shop.items.length();
 
         let item = Item{
-            id: item_id,
+            id: object::new(ctx),
+            id_: item_id,
             title: string::utf8(title),
             description:string::utf8(description),
             price: price,
@@ -299,7 +287,7 @@ module movefans::sui_marketplace {
         shop_owner_cap: &ShopOwnerCapability,
         item_id: u64
     ) {
-        assert!(shop.shop_owner_cap== object::uid_to_inner(&shop_owner_cap.id), ENotShopOwner);
+        assert!(shop_owner_cap.shop == object::id(shop), ENotShopOwner);
         assert!(item_id <= shop.items.length(), EInvalidItemId);
         assert!(item_id <= shop.items.length(), EInvalidItemId);
 
@@ -329,10 +317,10 @@ module movefans::sui_marketplace {
         recipient: address,
         payment_coin: &mut coin::Coin<SUI>,
         ctx: &mut TxContext
-    ) {
+    ) : Item {
         assert!(item_id <= shop.items.length(), EInvalidItemId);
         
-        let item = &mut shop.items[item_id];
+        let mut item = vector::remove(&mut shop.items, item_id);
         
         assert!(item.available >= quantity, EInvalidQuantity);
 
@@ -348,19 +336,6 @@ module movefans::sui_marketplace {
 
         coin::put(&mut shop.balance, paid);
 
-        let mut i = 0_u64;
-
-        while (i < quantity) {
-            let purchased_item_uid = object::new(ctx);
-
-            transfer::transfer(PurchasedItem {
-                id: purchased_item_uid,
-                shop_id: object::uid_to_inner(&shop.id),
-                item_id: item_id }, recipient);
-
-            i = i+1;
-        };
-
         event::emit(ItemPurchased {
             shop_id: object::uid_to_inner(&shop.id),
             item_id: item_id,
@@ -368,14 +343,8 @@ module movefans::sui_marketplace {
             buyer: recipient,
         });
 
-        if (item.available == 0 ) {
-            event::emit(ItemUnlisted{
-                shop_id: object::uid_to_inner(&shop.id),
-                item_id: item_id,
-            });
+        item
 
-            vector::borrow_mut(&mut shop.items, item_id).listed = false;
-        }
     }
 
     /*
@@ -394,9 +363,8 @@ module movefans::sui_marketplace {
         recipient: address,
         ctx: &mut TxContext
     ) {
-        
-        assert!(shop.shop_owner_cap== object::uid_to_inner(&shop_owner_cap.id), ENotShopOwner);
-        
+        assert!(shop_owner_cap.shop == object::id(shop), ENotShopOwner);
+
         assert!(amount > 0 && amount <= shop.balance.value(), EInvalidWithdrawalAmount);
 
         let take_coin = coin::take(&mut shop.balance, amount, ctx);
@@ -414,11 +382,7 @@ module movefans::sui_marketplace {
     public fun get_shop_uid(shop: &Shop): &UID {
         &shop.id
     }
-
-    public fun get_shop_owner_cap(shop: &Shop): ID {
-        shop.shop_owner_cap
-    }
-
+    
     public fun get_shop_balance(shop: &Shop):  &Balance<SUI> {
         &shop.balance
     }
@@ -438,11 +402,6 @@ module movefans::sui_marketplace {
 
     public fun get_shop_owner_cap_shop(shop_owner_cap: &ShopOwnerCapability): ID {
         shop_owner_cap.shop
-    }
-
-    // getters for the item struct
-    public fun get_item_id(item: &Item): u64 {
-        item.id
     }
 
     public fun get_item_title(item: &Item): String {
@@ -475,14 +434,5 @@ module movefans::sui_marketplace {
 
     public fun get_item_category(item: &Item): u8{
         item.category
-    }
-
-    // getters for the purchased item struct
-    public fun get_purchased_item_shop_id(purchased_item: &PurchasedItem): ID {
-        purchased_item.shop_id
-    }
-
-    public fun get_purchased_item_id(purchased_item: &PurchasedItem): u64 {    
-        purchased_item.item_id
     }
 }
